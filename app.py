@@ -5,6 +5,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from sklearn.linear_model import LinearRegression
+from difflib import SequenceMatcher
+from datetime import datetime
 
 # 0. Setelan Halaman
 st.set_page_config(page_title="Enterprise Supply Chain SaaS", layout="wide", initial_sidebar_state="expanded")
@@ -13,405 +15,365 @@ st.markdown("""
     <style>
     .main {background-color: #f8f9fa;}
     h1 {color: #1f77b4;}
-    .stAlert {margin-bottom: 1rem;}
-    @media print {
-        .stSidebar {display: none;}
-        button {display: none;}
-        .stTabs [data-baseweb="tab-list"] {display: none;}
-    }
+    @media print { .stSidebar, button, .stTabs [data-baseweb="tab-list"] {display: none;} }
+    .score-high {color: #0f5132; background-color: #d1e7dd; padding: 2px 8px; border-radius: 4px; font-weight: bold;}
+    .score-med {color: #664d03; background-color: #fff3cd; padding: 2px 8px; border-radius: 4px; font-weight: bold;}
+    .score-low {color: #842029; background-color: #f8d7da; padding: 2px 8px; border-radius: 4px; font-weight: bold;}
+    .insight-box {background-color: var(--secondary-background-color); color: var(--text-color); border-left: 5px solid #1f77b4; padding: 15px; margin-top: 15px; border-radius: 4px;}
+    .alert-card-kritis {background-color: #ffcccc; color: #cc0000; padding: 10px 15px; border-radius: 6px; font-weight: bold; margin-bottom: 8px; border-left: 5px solid #cc0000;}
+    .alert-card-warning {background-color: #fff2cc; color: #cc9900; padding: 10px 15px; border-radius: 6px; font-weight: bold; margin-bottom: 8px; border-left: 5px solid #cc9900;}
+    .landing-card {background-color: var(--secondary-background-color); padding: 20px; border-radius: 10px; border-top: 4px solid #1f77b4; height: 100%;}
     </style>
 """, unsafe_allow_html=True)
 
-st.title("🚀 Enterprise Supply Chain & Prescriptive Platform")
-st.write("Platform Logistik Terpadu: Multi-Variabel Engine, Sistem Peringatan Dini, Klasifikasi ABC, & Simulasi What-If.")
+# --- 11 & 12. MEMORI SISTEM UNTUK HISTORY & TEMPLATE ---
+if 'tahap_analisis' not in st.session_state: st.session_state.tahap_analisis = False
+if 'nama_file_terakhir' not in st.session_state: st.session_state.nama_file_terakhir = ""
+if 'history_analisis' not in st.session_state: st.session_state.history_analisis = []
+if 'template_mapping' not in st.session_state: st.session_state.template_mapping = {}
 
-# --- FITUR INGATAN (SESSION STATE) ---
-if 'tombol_ditekan' not in st.session_state:
-    st.session_state.tombol_ditekan = False
+KAMUS_ISTILAH = {
+    'Nama Barang': ['nama', 'item', 'produk', 'barang', 'description', 'desc', 'koleksi', 'name', 'sku', 'bahan', 'id'],
+    'Stok Aktual': ['stok', 'stock', 'qty', 'jumlah', 'fisik', 'sisa', 'on_hand', 'tersedia', 'kuantitas', 'balance'],
+    'Safety Stock (ROP)': ['rop', 'min', 'minimum', 'batas', 'safety', 'ambang', 'threshold', 'buffer'],
+    'Konsumsi Harian': ['konsumsi', 'penggunaan', 'sales', 'terjual', 'harian', 'daily', 'avg_sales', 'rata'],
+    'Harga Satuan': ['harga', 'price', 'cost', 'nilai', 'satuan', 'beli', 'unit_cost', 'hpp']
+}
 
-# 1. Kotak Upload di Sidebar
-st.sidebar.header("📂 1. Unggah Dataset Persediaan")
-file_unggahan = st.sidebar.file_uploader("Pilih dokumen (Format CSV / Excel)", type=["csv", "xlsx", "xls"])
-st.sidebar.markdown("---")
-
-if file_unggahan is not None:
-    
-    nama_file = file_unggahan.name
-    if nama_file.endswith('.csv'):
-        tabel_mentah = pd.read_csv(file_unggahan)
-    elif nama_file.endswith(('.xlsx', '.xls')):
-        tabel_mentah = pd.read_excel(file_unggahan) 
-        
-    kolom_csv = tabel_mentah.columns.tolist()
-    format_tampilan = lambda nama: str(nama).replace('_', ' ')
-
-    # 2. Pemetaan Wajib
-    st.sidebar.header("⚙️ 2. Pemetaan Variabel Utama")
-    col_nama = st.sidebar.selectbox("Identitas / Nama Item:", kolom_csv, index=0, format_func=format_tampilan)
-    col_stok = st.sidebar.selectbox("Kuantitas Stok Aktual:", kolom_csv, index=min(1, len(kolom_csv)-1), format_func=format_tampilan)
-    
-    # 3. Parameter Opsional & Setelan Logistik / ML
-    st.sidebar.markdown("---")
-    st.sidebar.header("💎 3. Parameter Opsional & Logistik")
-    
-    opsi_pilihan = ["-- Lewati (Tidak Ada) --"] + kolom_csv
-    col_rop = st.sidebar.selectbox("Batas Minimum (Safety Stock):", opsi_pilihan, format_func=format_tampilan)
-    col_penggunaan = st.sidebar.selectbox("Tingkat Konsumsi Harian (Aktifkan Forecast):", opsi_pilihan, format_func=format_tampilan)
-    col_harga = st.sidebar.selectbox("Nilai / Harga Per Unit (Aktifkan Finansial):", opsi_pilihan, format_func=format_tampilan)
-    
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("🚚 Pengaturan Operasional (Reorder)")
-    lead_time = st.sidebar.number_input("Lead Time / Waktu Pengiriman Supplier (Hari):", min_value=1, value=3, step=1)
-    target_pemenuhan = st.sidebar.number_input("Target Pemenuhan Stok Ulang (Hari):", min_value=7, value=30, step=7)
-    
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("🔮 Metode Prediksi Permintaan")
-    metode_forecast = st.sidebar.selectbox(
-        "Pilih Algoritma Forecasting:",
-        ["Simulasi Linier Matematika", "Linear Regression (Machine Learning)", "ARIMA (Butuh Data Historis Waktu)*", "Prophet (Butuh Data Historis Waktu)*", "XGBoost (Butuh Data Historis Waktu)*"]
-    )
-    
-    kolom_tersisa = [k for k in kolom_csv if k not in [col_nama, col_stok, col_rop, col_penggunaan, col_harga]]
-    kolom_kustom_dipilih = st.sidebar.multiselect(
-        "Atribut Kategorisasi Ekstra (Bisa pilih banyak):", 
-        options=kolom_tersisa,
-        format_func=format_tampilan
-    )
-
-    if st.sidebar.button("🚀 Proses Data & Jalankan AI"):
-        st.session_state.tombol_ditekan = True
-
-    if st.session_state.tombol_ditekan:
-        
-        tabel_inventory = tabel_mentah.rename(columns={
-            col_nama: 'Nama Barang',
-            col_stok: 'Stok Saat Ini'
-        })
-        tabel_inventory['Stok Saat Ini'] = pd.to_numeric(tabel_inventory['Stok Saat Ini'], errors='coerce').fillna(0)
-        tabel_inventory['Rekomendasi Waktu'] = '✅ AMAN'
-
-        fitur_rop_aktif = False
-        if col_rop != "-- Lewati (Tidak Ada) --":
-            tabel_inventory['Batas Aman (ROP)'] = pd.to_numeric(tabel_mentah[col_rop], errors='coerce').fillna(0)
-            fitur_rop_aktif = True
-            tabel_inventory['Rekomendasi Waktu'] = np.where(tabel_inventory['Stok Saat Ini'] < tabel_inventory['Batas Aman (ROP)'], '🚨 KRITIS (Di Bawah ROP)', '✅ AMAN')
-
-        # -- LOGIKA FORECAST & AI REGRESI LINIER --
-        fitur_forecast_aktif = False
-        if col_penggunaan != "-- Lewati (Tidak Ada) --":
-            tabel_inventory['Penggunaan Harian'] = pd.to_numeric(tabel_mentah[col_penggunaan], errors='coerce').fillna(1)
-            
-            if metode_forecast == "Linear Regression (Machine Learning)":
-                sisa_hari_list = []
-                for index, row in tabel_inventory.iterrows():
-                    X_train = np.array([0, 1, 2, 3, 4]).reshape(-1, 1)
-                    y_train = np.array([row['Stok Saat Ini'], 
-                                        max(row['Stok Saat Ini'] - row['Penggunaan Harian'], 0),
-                                        max(row['Stok Saat Ini'] - (row['Penggunaan Harian']*2), 0),
-                                        max(row['Stok Saat Ini'] - (row['Penggunaan Harian']*3), 0),
-                                        max(row['Stok Saat Ini'] - (row['Penggunaan Harian']*4), 0)])
-                    model = LinearRegression()
-                    model.fit(X_train, y_train)
-                    if model.coef_[0] != 0:
-                        hari_habis_ml = -model.intercept_ / model.coef_[0]
-                        sisa_hari_list.append(max(round(hari_habis_ml, 1), 0))
-                    else:
-                        sisa_hari_list.append(0)
-                tabel_inventory['Sisa Hari'] = sisa_hari_list
-            else:
-                tabel_inventory['Sisa Hari'] = (tabel_inventory['Stok Saat Ini'] / tabel_inventory['Penggunaan Harian']).round(1)
-            
-            tabel_inventory['Rekomendasi Waktu'] = np.where(
-                tabel_inventory['Sisa Hari'] <= 7, '🚨 KRITIS (Pesan Sekarang)',
-                np.where(tabel_inventory['Sisa Hari'] <= 14, '⚠️ WARNING (Siapkan PO)', '✅ AMAN')
-            )
-            fitur_forecast_aktif = True
-
-        fitur_finansial_aktif = False
-        if col_harga != "-- Lewati (Tidak Ada) --":
-            tabel_inventory['Harga Satuan Standar'] = pd.to_numeric(tabel_mentah[col_harga], errors='coerce').fillna(0)
-            tabel_inventory['Total Nilai Aset'] = tabel_inventory['Stok Saat Ini'] * tabel_inventory['Harga Satuan Standar']
-            fitur_finansial_aktif = True
-
-        # --- IMPLEMENTASI BARU: MEMPERTAHANKAN VARIABEL KUMULATIF UNTUK PARETO CHART ---
-        if fitur_finansial_aktif and len(tabel_inventory) > 0:
-            total_nilai_gudang = tabel_inventory['Total Nilai Aset'].sum()
-            if total_nilai_gudang > 0:
-                tabel_inventory = tabel_inventory.sort_values(by='Total Nilai Aset', ascending=False)
-                tabel_inventory['Kumulatif_Pct'] = tabel_inventory['Total Nilai Aset'].cumsum() / total_nilai_gudang
-                tabel_inventory['Analisis ABC'] = np.where(tabel_inventory['Kumulatif_Pct'] <= 0.70, 'Kategori A (Nilai Tinggi)',
-                                                   np.where(tabel_inventory['Kumulatif_Pct'] <= 0.90, 'Kategori B (Nilai Menengah)', 
-                                                            'Kategori C (Nilai Rendah)'))
-            else:
-                tabel_inventory['Analisis ABC'] = 'Kategori C (Nilai Rendah)'
-                tabel_inventory['Kumulatif_Pct'] = 1.0
+def deteksi_kolom_cerdas(df, peran, keywords):
+    kandidat = "-- Lewati (Tidak Ada) --"; best_score = 0
+    for col in df.columns:
+        col_norm = str(col).lower().replace('_', ' '); score = 0
+        if any(kw == col_norm for kw in keywords): score = 100
+        elif any(kw in col_norm.split() for kw in keywords): score = 90
+        elif any(kw in col_norm for kw in keywords): score = 75
         else:
-            tabel_inventory['Analisis ABC'] = 'Butuh Data Finansial'
-            tabel_inventory['Kumulatif_Pct'] = 0.0
+            max_ratio = max([int(SequenceMatcher(None, kw, col_norm).ratio() * 100) for kw in keywords])
+            if max_ratio > 65: score = max_ratio
 
-        # --- LOGIKA OPERASIONAL REORDER ADVISOR ---
-        if fitur_forecast_aktif:
-            tabel_inventory['Hari Terbaik Memesan'] = (tabel_inventory['Sisa Hari'] - lead_time).round(1)
-            tabel_inventory['Rekomendasi Pembelian'] = np.where(
-                tabel_inventory['Sisa Hari'] <= lead_time, "🚨 Harus Dipesan Hari Ini!",
-                np.where(tabel_inventory['Sisa Hari'] <= (lead_time + 5), 
-                         "⏳ Jadwalkan dalam " + tabel_inventory['Hari Terbaik Memesan'].astype(str) + " hari", 
-                         "✅ Belum Perlu Pemesanan")
-            )
-            tabel_inventory['Rekomendasi Jumlah Beli (Unit)'] = np.where(
-                tabel_inventory['Sisa Hari'] <= (lead_time + 5),
-                ((tabel_inventory['Penggunaan Harian'] * target_pemenuhan) + 
-                 (tabel_inventory['Batas Aman (ROP)'] if fitur_rop_aktif else 0) - 
-                 tabel_inventory['Stok Saat Ini']).round(0),
-                0
-            )
-            tabel_inventory['Rekomendasi Jumlah Beli (Unit)'] = tabel_inventory['Rekomendasi Jumlah Beli (Unit)'].clip(lower=0)
+        if score > 0:
+            tipe_data = df[col].dtype
+            if peran == 'Nama Barang' and tipe_data == 'object': score = min(score + 10, 100)
+            elif peran != 'Nama Barang':
+                if pd.api.types.is_numeric_dtype(tipe_data): score = min(score + 15, 100)
+                else: score = max(score - 30, 0)
+        if score > best_score: best_score = score; kandidat = col
+    return kandidat, best_score
 
-        # KONDISI STATISTIK RINGKASAN GUDANG
-        cnt_total = len(tabel_inventory)
-        cnt_kritis = len(tabel_inventory[tabel_inventory['Rekomendasi Waktu'].str.contains('KRITIS', na=False)])
-        cnt_warning = len(tabel_inventory[tabel_inventory['Rekomendasi Waktu'].str.contains('WARNING', na=False)])
-        cnt_aman = len(tabel_inventory[tabel_inventory['Rekomendasi Waktu'].str.contains('AMAN', na=False)])
+st.title("🚀 Enterprise Supply Chain & Prescriptive Platform")
 
-        # --- TAMPILAN DASHBOARD ---
-        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-            "📊 Ringkasan Eksekutif", "🚚 Rekomendasi Pemesanan AI", "🔍 Detail Profil Barang", 
-            "🔬 Simulasi Skenario (What-If)", "📈 Analisis Forecast", "🗄️ Database Terjemahan"
-        ])
+if not st.session_state.tahap_analisis:
+    st.sidebar.header("📂 1. Unggah Dataset Persediaan")
+    file_unggahan = st.sidebar.file_uploader("Pilih dokumen (Format CSV / Excel)", type=["csv", "xlsx", "xls"])
+    
+    # --- 11. SIDEBAR RIWAYAT ANALISIS ---
+    if st.session_state.history_analisis:
+        st.sidebar.markdown("---")
+        with st.sidebar.expander("🕒 Riwayat Analisis Sebelumnya", expanded=True):
+            for h in reversed(st.session_state.history_analisis[-5:]): # Tampilkan 5 terakhir
+                st.markdown(f"**📄 {h['file']}**<br><small>📅 {h['waktu']} | ⭐ Skor: {h['skor']}/100</small>", unsafe_allow_html=True)
+                st.markdown("---")
 
-        # TAB 1: RINGKASAN EKSEKUTIF
-        with tab1:
-            st.info("💡 **Tips Ekspor PDF:** Tekan **Ctrl + P** pada keyboard Anda, lalu pilih 'Save as PDF' untuk mencetak laporan Halaman Eksekutif ini.")
-            st.subheader("📋 Ringkasan Status & Kondisi Gudang Aktual")
-            s1, s2, s3, s4 = st.columns(4)
-            s1.metric("📦 Total Jenis Barang", f"{cnt_total} Item")
-            s2.metric("🟢 Jumlah Kondisi Aman", f"{cnt_aman} Item")
-            s3.metric("🟡 Jumlah Perlu Pemantauan", f"{cnt_warning} Item", delta_color="off")
-            s4.metric("🔴 Jumlah Kondisi Kritis", f"{cnt_kritis} Item", delta_color="inverse")
+    if file_unggahan is None:
+        # --- 10. LANDING PAGE PROFESIONAL ---
+        st.markdown("### Transformasi Data Inventori Anda Menjadi Keputusan Strategis.")
+        st.write("Platform ini dirancang khusus untuk menganalisis data rantai pasok Anda, mengkategorikan aset, dan memprediksi kebutuhan pemesanan secara otomatis menggunakan kecerdasan buatan.")
+        
+        st.markdown("<br>", unsafe_allow_html=True)
+        col_lp1, col_lp2, col_lp3 = st.columns(3)
+        with col_lp1:
+            st.markdown("<div class='landing-card'><h4>📊 Dashboard & ABC Analisis</h4><p>Peta visual kesehatan inventori dan pemilahan otomatis item Kategori A, B, dan C berdasarkan prinsip Pareto.</p></div>", unsafe_allow_html=True)
+        with col_lp2:
+            st.markdown("<div class='landing-card'><h4>🚚 AI Reorder Advisor</h4><p>Sistem merekomendasikan daftar barang yang harus dibeli hari ini lengkap dengan kuantitasnya untuk mencegah *stockout*.</p></div>", unsafe_allow_html=True)
+        with col_lp3:
+            st.markdown("<div class='landing-card'><h4>🔬 Risk Simulator</h4><p>Uji ketahanan gudang terhadap skenario terburuk seperti lonjakan permintaan mendadak atau keterlambatan supplier.</p></div>", unsafe_allow_html=True)
+        
+        st.markdown("<br><br>", unsafe_allow_html=True)
+        st.info("👈 **Mulai Sekarang:** Silakan unggah dataset *inventory* Anda pada panel di sebelah kiri.")
+
+    if file_unggahan is not None:
+        if file_unggahan.name != st.session_state.nama_file_terakhir:
+            st.session_state.tahap_analisis = False
+            st.session_state.nama_file_terakhir = file_unggahan.name
+
+        nama_file = file_unggahan.name
+        if nama_file.endswith('.csv'): tabel_mentah = pd.read_csv(file_unggahan)
+        elif nama_file.endswith(('.xlsx', '.xls')): tabel_mentah = pd.read_excel(file_unggahan) 
+        
+        kolom_csv = tabel_mentah.columns.tolist()
+        opsi_dropdown = ["-- Lewati (Tidak Ada) --"] + kolom_csv
+
+        st.subheader("🪄 Sistem Deteksi Skema & Kualitas Data (AI Data Profiler)")
+        
+        # --- 12. FITUR TEMPLATE MAPPING ---
+        pilihan_template = "-- Deteksi AI Otomatis --"
+        if st.session_state.template_mapping:
+            st.write("💡 **Pilih Template Mapping:**")
+            pilihan_template = st.selectbox("Gunakan konfigurasi pemetaan yang pernah disimpan:", ["-- Deteksi AI Otomatis --"] + list(st.session_state.template_mapping.keys()))
+            st.markdown("---")
+
+        total_sel = tabel_mentah.size; sel_kosong = tabel_mentah.isnull().sum().sum()
+        pct_kosong = (sel_kosong / total_sel) * 100 if total_sel > 0 else 0
+        pct_lengkap = 100 - pct_kosong
+        
+        mapping_terpilih = {}; kolom_dikenali = 0; hasil_deteksi = {}
+        
+        for peran, keywords in KAMUS_ISTILAH.items():
+            kandidat_ai, score = deteksi_kolom_cerdas(tabel_mentah, peran, keywords)
             
-            st.markdown("---")
-            st.subheader("Key Performance Indicators (KPI)")
-            kolom_kpi = 2 if fitur_finansial_aktif else 1
-            kpi_cols = st.columns(kolom_kpi)
-            kpi_cols[0].metric("📊 Validitas Basis Data", "100% Terpetakan", "Sistem Sinkron")
-            if fitur_finansial_aktif:
-                total_nilai_gudang = tabel_inventory['Total Nilai Aset'].sum()
-                kpi_cols[1].metric("💰 Total Nilai Kapitalisasi Aset", f"Rp {total_nilai_gudang:,.0f}")
+            # Timpa hasil deteksi AI jika user memilih Template
+            if pilihan_template != "-- Deteksi AI Otomatis --":
+                kandidat_template = st.session_state.template_mapping[pilihan_template].get(peran, "-- Lewati (Tidak Ada) --")
+                if kandidat_template in opsi_dropdown:
+                    kandidat_ai = kandidat_template
+                    score = 100 # Visual feedback bahwa template berhasil di-apply
+            
+            hasil_deteksi[peran] = (kandidat_ai, score)
+            if score >= 75: kolom_dikenali += 1
+            
+        dq_score = int((pct_lengkap * 0.5) + ((kolom_dikenali / len(KAMUS_ISTILAH)) * 50))
+        
+        col_dq1, col_dq2, col_dq3, col_dq4 = st.columns(4)
+        col_dq1.metric("🔍 Kolom Terpetakan", f"{kolom_dikenali} dari {len(KAMUS_ISTILAH)}")
+        col_dq2.metric("📝 Kelengkapan Data", f"{pct_lengkap:.1f}%")
+        col_dq3.metric("⚠️ Missing Values", f"{sel_kosong} Sel ({pct_kosong:.1f}%)")
+        col_dq4.metric("⭐ Data Quality Score", f"{dq_score}/100")
+        st.markdown("---")
+        
+        c_h1, c_h2, c_h3, c_h4 = st.columns([2, 3, 2, 3])
+        c_h1.markdown("<b>Parameter Sistem</b>", unsafe_allow_html=True); c_h2.markdown("<b>Deteksi Sistem / Template</b>", unsafe_allow_html=True)
+        c_h3.markdown("<b>Confidence / Status</b>", unsafe_allow_html=True); c_h4.markdown("<b>Koreksi Manual</b>", unsafe_allow_html=True)
 
-            st.markdown("---")
-            st.subheader("🔔 Pusat Notifikasi & Peringatan")
-            if cnt_kritis > 0:
-                barang_kritis = tabel_inventory[tabel_inventory['Rekomendasi Waktu'].str.contains('KRITIS', na=False)]['Nama Barang'].tolist()
-                st.error(f"🔴 **KONDISI KRITIS (TINDAKAN SEGERA):** Terdapat **{cnt_kritis} item** di zona bahaya persediaan ({', '.join(barang_kritis)}).")
-            if cnt_warning > 0:
-                barang_warning = tabel_inventory[tabel_inventory['Rekomendasi Waktu'].str.contains('WARNING', na=False)]['Nama Barang'].tolist()
-                st.warning(f"🟡 **PERLU PEMANTAUAN (WARNING):** Terdapat **{cnt_warning} item** dalam masa tenggang transisi PO ({', '.join(barang_warning)}).")
-            if cnt_aman == cnt_total:
-                st.success("🟢 **KONDISI SEHAT:** Seluruh lini persediaan berada dalam kondisi aman.")
+        for peran, (kandidat_ai, score) in hasil_deteksi.items():
+            c1, c2, c3, c4 = st.columns([2, 3, 2, 3])
+            c1.write(f"**{peran}**"); c2.code(kandidat_ai)
+            
+            if pilihan_template != "-- Deteksi AI Otomatis --": chip_style = "<span class='score-high'>✅ via Template</span>"
+            elif score >= 80: chip_style = f"<span class='score-high'>{score}% (Sangat Yakin)</span>"
+            elif score >= 60: chip_style = f"<span class='score-med'>{score}% (Cukup Yakin)</span>"
+            else: chip_style = f"<span class='score-low'>{score}% (Ragu / Lewati)</span>"
+            c3.markdown(chip_style, unsafe_allow_html=True)
+            
+            idx_default = opsi_dropdown.index(kandidat_ai) if kandidat_ai in opsi_dropdown else 0
+            mapping_terpilih[peran] = c4.selectbox(f"Koreksi {peran}", opsi_dropdown, index=idx_default, label_visibility="collapsed")
 
-            st.markdown("---")
-            st.subheader("Peta Status Persediaan (Kuantitas Fisik)")
-            warna_grafik = 'Rekomendasi Waktu'
-            warna_status = {'🚨 KRITIS (Pesan Sekarang)': '#ef553b', '🚨 KRITIS (Di Bawah ROP)': '#ef553b', '⚠️ WARNING (Siapkan PO)': '#feca28', '✅ AMAN': '#00cc96'}
-            if kolom_kustom_dipilih:
-                warna_grafik = kolom_kustom_dipilih[0]
-                warna_status = None
-                st.info(f"💡 Pengelompokan warna grafik disesuaikan berdasarkan variabel kustom: **{warna_grafik.replace('_', ' ')}**")
+        st.markdown("---")
+        st.subheader("🚚 Pengaturan Operasional Logistik")
+        col_L1, col_L2, col_L3 = st.columns(3)
+        lead_time = col_L1.number_input("Lead Time Supplier (Hari):", min_value=1, value=3)
+        target_pemenuhan = col_L2.number_input("Target Hari Pemenuhan Stok Ulang:", min_value=7, value=30, step=7)
+        metode_forecast = col_L3.selectbox("Metode Forecast:", ["Simulasi Linier Matematika", "Linear Regression (Machine Learning)"])
+        kolom_kustom_dipilih = st.multiselect("Pilih Kolom Tambahan untuk Filter / Grouping:", options=[k for k in kolom_csv if k not in mapping_terpilih.values()])
 
-            fig_bar = px.bar(tabel_inventory, x='Nama Barang', y='Stok Saat Ini', color=warna_grafik, color_discrete_map=warna_status, text='Stok Saat Ini')
-            fig_bar.update_traces(textposition='outside')
-            st.plotly_chart(fig_bar, use_container_width=True)
+        st.markdown("---")
+        # --- 12. SIMPAN TEMPLATE BARU ---
+        nama_template_baru = st.text_input("💾 Simpan Konfigurasi Pemetaan Ini Sebagai Template Baru (Opsional):", placeholder="Contoh: Template Data Gudang Pusat")
 
-            # --- IMPLEMENTASI BARU: GABUNGAN PARETO CHART & GRAFIK ANALISIS ABC (MENGGANTIKAN PIE CHART LAMA) ---
-            if fitur_finansial_aktif:
-                st.markdown("---")
-                st.subheader("🎯 Klasifikasi Manajemen ABC & Kurva Analisis Pareto Finansial")
-                st.write("Grafik ini memetakan nilai kontribusi finansial per item secara kumulatif (Urutan Pareto Descending) untuk menentukan prioritas kontrol kapitalisasi aset.")
-                
-                # Mengonversi desimal kumulatif ke format persen (0 - 100%)
-                tabel_inventory['Kumulatif_Pct_100'] = tabel_inventory['Kumulatif_Pct'] * 100
-                
-                # Pemetaan warna standar industri untuk klasifikasi ABC
-                color_map_abc = {
-                    'Kategori A (Nilai Tinggi)': '#1f77b4',  # Biru Korporat
-                    'Kategori B (Nilai Menengah)': '#ff7f0e', # Oranye Peringatan
-                    'Kategori C (Nilai Rendah)': '#2ca02c'   # Hijau Stabil
-                }
-                bar_colors = tabel_inventory['Analisis ABC'].map(color_map_abc).tolist()
-                
-                # Membuat diagram dual-axis kombinasi Bar & Line
-                fig_pareto = make_subplots(specs=[[{"secondary_y": True}]])
-                
-                # Sumbu Utama: Bar Chart Nilai Aset per Item
-                fig_pareto.add_trace(
-                    go.Bar(
-                        x=tabel_inventory['Nama Barang'],
-                        y=tabel_inventory['Total Nilai Aset'],
-                        name="Nilai Aset Item (Rp)",
-                        marker_color=bar_colors,
-                        hovertemplate="<b>%{x}</b><br>Nilai Aset: Rp %{y:,.0f}<extra></extra>"
-                    ),
-                    secondary_y=False
-                )
-                
-                # Sumbu Sekunder: Line Chart Akumulasi Kumulatif Pareto
-                fig_pareto.add_trace(
-                    go.Scatter(
-                        x=tabel_inventory['Nama Barang'],
-                        y=tabel_inventory['Kumulatif_Pct_100'],
-                        name="Kurva Kumulatif (%)",
-                        mode="lines+markers",
-                        line=dict(color="#ef553b", width=3),
-                        marker=dict(size=8),
-                        hovertemplate="<b>%{x}</b><br>Akumulasi Kumulatif: %{y:.1f}%<extra></extra>"
-                    ),
-                    secondary_y=True
-                )
-                
-                # Mengatur Tata Letak Layout
-                fig_pareto.update_layout(
-                    title_text="<b>Dual-Axis Pareto Chart (Klasifikasi Finansial ABC)</b>",
-                    xaxis_title="Nama Barang",
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                    margin=dict(t=50, b=50, l=50, r=50)
-                )
-                
-                fig_pareto.update_yaxes(title_text="<b>Nilai Kapitalisasi Aset (Rp)</b>", secondary_y=False)
-                fig_pareto.update_yaxes(title_text="<b>Persentase Akumulasi Kumulatif (%)</b>", secondary_y=True, range=[0, 105])
-                
-                st.plotly_chart(fig_pareto, use_container_width=True)
-                
-                # Legenda penjelas kategori warna
-                st.markdown("""
-                <div style="display: flex; gap: 25px; justify-content: center; font-weight: bold; margin-top: -10px; margin-bottom: 20px;">
-                    <span style="color: #1f77b4;">■ Kategori A (Menyerap ~70% Modal - Pengawasan Sangat Ketat)</span>
-                    <span style="color: #ff7f0e;">■ Kategori B (Menyerap ~20% Modal - Pengawasan Sedang)</span>
-                    <span style="color: #2ca02c;">■ Kategori C (Menyerap ~10% Modal - Pengawasan Longgar)</span>
-                </div>
-                """, unsafe_allow_html=True)
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("🚀 KONFIRMASI PEMETAAN & JALANKAN DASHBOARD SEKARANG", type="primary", use_container_width=True):
+            if nama_template_baru: st.session_state.template_mapping[nama_template_baru] = mapping_terpilih
+            
+            # --- 11. CATAT KE HISTORY ---
+            st.session_state.history_analisis.append({
+                "waktu": datetime.now().strftime("%d %b %Y, %H:%M"),
+                "file": nama_file,
+                "skor": dq_score
+            })
+            
+            st.session_state.map_final = mapping_terpilih
+            st.session_state.lead_time = lead_time
+            st.session_state.target_pemenuhan = target_pemenuhan
+            st.session_state.metode_forecast = metode_forecast
+            st.session_state.kolom_kustom = kolom_kustom_dipilih
+            st.session_state.dq_score = dq_score
+            st.session_state.df_mentah = tabel_mentah
+            st.session_state.tahap_analisis = True
+            st.rerun()
 
-        # TAB 2: REKOMENDASI PEMESANAN AI
-        with tab2:
-            st.subheader("📋 Rekomendasi Pembelian Barang Otomatis (AI Advisor)")
-            if fitur_forecast_aktif:
-                st.write(f"Kalkulasi didasarkan atas parameter ketetapan Lead Time: {lead_time} Hari & Target Pemenuhan: {target_pemenuhan} Hari.")
-                kolom_tampil_reorder = ['Nama Barang', 'Stok Saat Ini', 'Penggunaan Harian', 'Sisa Hari', 'Hari Terbaik Memesan', 'Rekomendasi Pembelian', 'Rekomendasi Jumlah Beli (Unit)']
-                if fitur_rop_aktif: kolom_tampil_reorder.insert(3, 'Batas Aman (ROP)')
-                if fitur_finansial_aktif: kolom_tampil_reorder.append('Analisis ABC')
-                
-                st.dataframe(tabel_inventory[kolom_tampil_reorder].style.map(
-                    lambda val: 'background-color: #ffcccc; color: #cc0000; font-weight: bold;' if val == "🚨 Harus Dipesan Hari Ini!" else (
-                                'background-color: #fff2cc; color: #cc9900;' if "⏳ Jadwalkan" in str(val) else ''),
-                    subset=['Rekomendasi Pembelian']
-                ), use_container_width=True)
-            else:
-                st.warning("⚠️ Fitur Penasihat Reorder membutuhkan parameter 'Tingkat Konsumsi Harian' diaktifkan.")
-
-        # TAB 3: DETAIL PROFIL BARANG (DEEP DIVE)
-        with tab3:
-            st.subheader("🔍 Analisis Mendalam Per Item (Deep Dive Analysis)")
-            pilihan_barang = st.selectbox("Pilih Barang yang Ingin Dianalisis:", tabel_inventory['Nama Barang'].tolist())
-            if pilihan_barang:
-                data_item = tabel_inventory[tabel_inventory['Nama Barang'] == pilihan_barang].iloc[0]
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Stok Saat Ini", f"{data_item['Stok Saat Ini']} Unit", data_item['Rekomendasi Waktu'])
-                if Math_Active := fitur_finansial_aktif:
-                    c2.metric("Total Nilai Aset", f"Rp {data_item['Total Nilai Aset']:,.0f}", data_item['Analisis ABC'])
-                if fitur_forecast_aktif:
-                    c3.metric("Ketahanan Stok", f"{data_item['Sisa Hari']} Hari", data_item['Rekomendasi Pembelian'])
-                
-                st.markdown("---")
-                if fitur_forecast_aktif:
-                    st.write("**Simulasi Proyeksi Penurunan Stok Khusus Item Ini:**")
-                    hari_item = np.arange(0, 31)
-                    stok_prediksi = np.maximum(data_item['Stok Saat Ini'] - (data_item['Penggunaan Harian'] * hari_item), 0)
-                    df_item_chart = pd.DataFrame({'Hari Ke-': hari_item, 'Prediksi Stok': stok_prediksi})
-                    fig_item = px.line(df_item_chart, x='Hari Ke-', y='Prediksi Stok', markers=True, title=f"Tren Penurunan Stok: {pilihan_barang}")
-                    fig_item.add_hline(y=(data_item['Batas Aman (ROP)'] if fitur_rop_aktif else 0), line_dash="dot", line_color="orange", annotation_text="Batas Aman (ROP)")
-                    st.plotly_chart(fig_item, use_container_width=True)
-
-        # TAB 4: SIMULASI SKENARIO (WHAT-IF)
-        with tab4:
-            st.subheader("🔬 Simulasi Skenario Risiko (What-If Analysis)")
-            st.write("Uji ketahanan gudang Anda jika terjadi disrupsi rantai pasok atau lonjakan pasar secara mendadak.")
-            if fitur_forecast_aktif:
-                col_w1, col_w2 = st.columns(2)
-                with col_w1:
-                    sim_kenaikan_demand = st.slider("Lonjakan Permintaan / Konsumsi Pasar (%)", min_value=0, max_value=100, value=0, step=5)
-                with col_w2:
-                    sim_keterlambatan = st.slider("Keterlambatan Pengiriman Logistik Supplier (Hari)", min_value=0, max_value=14, value=0, step=1)
-                
-                st.markdown("---")
-                df_simulasi = tabel_inventory.copy()
-                df_simulasi['Sim_Penggunaan'] = df_simulasi['Penggunaan Harian'] * (1 + (sim_kenaikan_demand/100))
-                df_simulasi['Sim_Sisa_Hari'] = (df_simulasi['Stok Saat Ini'] / df_simulasi['Sim_Penggunaan']).round(1)
-                sim_lead_time = lead_time + sim_keterlambatan
-                
-                df_simulasi['Sim_Rekomendasi_Beli'] = np.where(df_simulasi['Sim_Sisa_Hari'] <= sim_lead_time, "🚨 KRITIS (Gagal Penuhi Permintaan)!", 
-                                                      np.where(df_simulasi['Sim_Sisa_Hari'] <= (sim_lead_time + 5), "⚠️ Terancam Kritis", "✅ Aman"))
-                
-                df_banding = df_simulasi[['Nama Barang', 'Sisa Hari', 'Sim_Sisa_Hari', 'Rekomendasi Pembelian', 'Sim_Rekomendasi_Beli']].copy()
-                df_banding.columns = ['Nama Barang', 'Ketahanan Normal (Hari)', 'Ketahanan Skenario (Hari)', 'Status Normal', 'Status Skenario Risiko']
-                
-                st.dataframe(df_banding.style.map(
-                    lambda val: 'background-color: #ffcccc; color: #cc0000; font-weight: bold;' if "KRITIS" in str(val) else '', subset=['Status Skenario Risiko']), use_container_width=True)
-                
-                item_kolaps = len(df_banding[df_banding['Status Skenario Risiko'].str.contains("KRITIS")])
-                if item_kolaps > 0:
-                    st.error(f"💥 **Kesimpulan Skenario:** Terdapat **{item_kolaps} item** yang diprediksi akan mengalami kekosongan stok (*stockout*) sebelum barang baru tiba jika disrupsi ini benar-hari terjadi!")
-                else:
-                    st.success("✅ **Kesimpulan Skenario:** Gudang Anda cukup kuat menahan disrupsi skenario ini.")
-            else:
-                st.warning("⚠️ Fitur Simulasi membutuhkan 'Tingkat Konsumsi Harian' diaktifkan.")
-
-        # TAB 5: ANALISIS FORECAST PENURUNAN STOK UMUM
-        with tab5:
-            if fitur_forecast_aktif:
-                st.subheader(f"Simulasi Penurunan Stok (Metode Peramalan: {metode_forecast})")
-                if "Butuh Data" in metode_forecast:
-                    st.warning(f"⚠️ Mode Ekspansi: Algoritma {metode_forecast} diaktifkan dalam mode aman (Stabilitas Linier).")
-                
-                hari = np.arange(0, 31)
-                df_forecast = pd.DataFrame({'Hari Ke-': hari})
-                for index, row in tabel_inventory.iterrows():
-                    df_forecast[row['Nama Barang']] = np.maximum(row['Stok Saat Ini'] - (row['Penggunaan Harian'] * hari), 0)
-                
-                df_forecast_melted = df_forecast.melt(id_vars=['Hari Ke-'], var_name='Nama Barang', value_name='Prediksi Stok')
-                fig_line = px.line(df_forecast_melted, x='Hari Ke-', y='Prediksi Stok', color='Nama Barang', markers=True)
-                fig_line.add_hline(y=0, line_dash="solid", line_color="red")
-                st.plotly_chart(fig_line, use_container_width=True)
-            else:
-                st.warning("⚠️ Fitur Simulasi Forecast tidak aktif.")
-
-        # TAB 6: DATABASE UTAMA DENGAN WARNA VISUAL SEL TABLE
-        with tab6:
-            st.subheader("🗄️ Tabel Hasil Konversi Data Standar Sistem")
-            if kolom_kustom_dipilih:
-                st.write("🔍 **Filter Multi-Variabel Kustom:**")
-                kolom_filter = st.columns(len(kolom_kustom_dipilih))
-                for i, col_name in enumerate(kolom_kustom_dipilih):
-                    with kolom_filter[i]:
-                        pilihan_unik = ["Semua"] + tabel_mentah[col_name].dropna().astype(str).unique().tolist()
-                        filter_val = st.selectbox(f"Saring {col_name.replace('_', ' ')}:", pilihan_unik)
-                        if filter_val != "Semua":
-                            tabel_inventory = tabel_inventory[tabel_mentah[col_name].astype(str) == filter_val]
-
-            def style_status_visual(val):
-                if 'KRITIS' in str(val): return 'background-color: #ffcccc; color: #cc0000; font-weight: bold;'
-                elif 'WARNING' in str(val): return 'background-color: #fff2cc; color: #cc9900; font-weight: bold;'
-                elif 'AMAN' in str(val): return 'background-color: #d1e7dd; color: #0f5132;'
-                if 'Kategori A' in str(val): return 'color: #1f77b4; font-weight: bold;'
-                elif 'Kategori B' in str(val): return 'color: #ff7f0e; font-weight: bold;'
-                elif 'Kategori C' in str(val): return 'color: #2ca02c;'
-                return ''
-
-            kolom_ada_di_tabel = tabel_inventory.columns.tolist()
-            subset_styling = [c for c in ['Rekomendasi Waktu', 'Analisis ABC'] if c in kolom_ada_di_tabel]
-
-            st.dataframe(tabel_inventory.style.map(style_status_visual, subset=subset_styling), use_container_width=True)
-            st.markdown("---")
-            csv_hasil = tabel_inventory.to_csv(index=False).encode('utf-8')
-            st.download_button(label="📥 Download Laporan Hasil Analisis Lengkap (CSV)", data=csv_hasil, file_name="laporan_inventory_complete.csv", mime="text/csv")
-
+# =========================================================================
+# LAYAR 2: DASHBOARD UTAMA
+# =========================================================================
 else:
-    st.info("Sistem menunggu unggahan data. Silakan masukkan dokumen CSV atau Excel di panel kiri.")
+    st.sidebar.success("✅ Data berhasil dipetakan.")
+    if st.sidebar.button("⚙️ Atur Ulang Pemetaan / Ganti File", use_container_width=True):
+        st.session_state.tahap_analisis = False; st.rerun()
+
+    m = st.session_state.map_final; tabel_mentah = st.session_state.df_mentah
+    tabel_inventory = tabel_mentah.rename(columns={m['Nama Barang']: 'Nama Barang', m['Stok Aktual']: 'Stok Saat Ini'})
+    tabel_inventory['Stok Saat Ini'] = pd.to_numeric(tabel_inventory['Stok Saat Ini'], errors='coerce').fillna(0)
+    tabel_inventory['Rekomendasi Waktu'] = '✅ AMAN'
+
+    fitur_rop_aktif = False
+    if m['Safety Stock (ROP)'] != "-- Lewati (Tidak Ada) --":
+        tabel_inventory['Batas Aman (ROP)'] = pd.to_numeric(tabel_mentah[m['Safety Stock (ROP)']], errors='coerce').fillna(0)
+        fitur_rop_aktif = True
+        tabel_inventory['Rekomendasi Waktu'] = np.where(tabel_inventory['Stok Saat Ini'] < tabel_inventory['Batas Aman (ROP)'], '🚨 KRITIS (Di Bawah ROP)', '✅ AMAN')
+
+    fitur_forecast_aktif = False
+    if m['Konsumsi Harian'] != "-- Lewati (Tidak Ada) --":
+        tabel_inventory['Penggunaan Harian'] = pd.to_numeric(tabel_mentah[m['Konsumsi Harian']], errors='coerce').fillna(1)
+        if st.session_state.metode_forecast == "Linear Regression (Machine Learning)":
+            sisa_hari_list = []
+            for index, row in tabel_inventory.iterrows():
+                X_train = np.array([0, 1, 2, 3, 4]).reshape(-1, 1)
+                y_train = np.array([row['Stok Saat Ini'], max(row['Stok Saat Ini'] - row['Penggunaan Harian'], 0), max(row['Stok Saat Ini'] - (row['Penggunaan Harian']*2), 0), max(row['Stok Saat Ini'] - (row['Penggunaan Harian']*3), 0), max(row['Stok Saat Ini'] - (row['Penggunaan Harian']*4), 0)])
+                model = LinearRegression().fit(X_train, y_train)
+                sisa_hari_list.append(max(round(-model.intercept_ / model.coef_[0], 1), 0) if model.coef_[0] != 0 else 0)
+            tabel_inventory['Sisa Hari'] = sisa_hari_list
+        else:
+            tabel_inventory['Sisa Hari'] = (tabel_inventory['Stok Saat Ini'] / tabel_inventory['Penggunaan Harian']).round(1)
+        tabel_inventory['Rekomendasi Waktu'] = np.where(tabel_inventory['Sisa Hari'] <= 7, '🚨 KRITIS (Pesan Sekarang)', np.where(tabel_inventory['Sisa Hari'] <= 14, '⚠️ WARNING (Siapkan PO)', '✅ AMAN'))
+        fitur_forecast_aktif = True
+
+    fitur_finansial_aktif = False
+    if m['Harga Satuan'] != "-- Lewati (Tidak Ada) --":
+        tabel_inventory['Harga Satuan Standar'] = pd.to_numeric(tabel_mentah[m['Harga Satuan']], errors='coerce').fillna(0)
+        tabel_inventory['Total Nilai Aset'] = tabel_inventory['Stok Saat Ini'] * tabel_inventory['Harga Satuan Standar']
+        fitur_finansial_aktif = True
+
+    total_nilai_gudang = 0
+    if fitur_finansial_aktif and len(tabel_inventory) > 0:
+        total_nilai_gudang = tabel_inventory['Total Nilai Aset'].sum()
+        tabel_inventory = tabel_inventory.sort_values(by='Total Nilai Aset', ascending=False)
+        tabel_inventory['Kumulatif_Pct'] = tabel_inventory['Total Nilai Aset'].cumsum() / total_nilai_gudang if total_nilai_gudang > 0 else 0
+        tabel_inventory['Analisis ABC'] = np.where(tabel_inventory['Kumulatif_Pct'] <= 0.70, 'Kategori A', np.where(tabel_inventory['Kumulatif_Pct'] <= 0.90, 'Kategori B', 'Kategori C'))
+    else:
+        tabel_inventory['Analisis ABC'] = 'Butuh Data Finansial'; tabel_inventory['Kumulatif_Pct'] = 0.0
+
+    if fitur_forecast_aktif:
+        tabel_inventory['Hari Terbaik Memesan'] = (tabel_inventory['Sisa Hari'] - st.session_state.lead_time).round(1)
+        tabel_inventory['Rekomendasi Pembelian'] = np.where(tabel_inventory['Sisa Hari'] <= st.session_state.lead_time, "🚨 Harus Dipesan Hari Ini!", np.where(tabel_inventory['Sisa Hari'] <= (st.session_state.lead_time + 5), "⏳ Jadwalkan dalam " + tabel_inventory['Hari Terbaik Memesan'].astype(str) + " hari", "✅ Belum Perlu Pemesanan"))
+        tabel_inventory['Rekomendasi Jumlah Beli (Unit)'] = np.where(tabel_inventory['Sisa Hari'] <= (st.session_state.lead_time + 5), ((tabel_inventory['Penggunaan Harian'] * st.session_state.target_pemenuhan) + (tabel_inventory['Batas Aman (ROP)'] if fitur_rop_aktif else 0) - tabel_inventory['Stok Saat Ini']).round(0), 0).clip(min=0)
+
+    cnt_total = len(tabel_inventory); cnt_kritis = len(tabel_inventory[tabel_inventory['Rekomendasi Waktu'].str.contains('KRITIS', na=False)])
+    cnt_warning = len(tabel_inventory[tabel_inventory['Rekomendasi Waktu'].str.contains('WARNING', na=False)]); cnt_aman = len(tabel_inventory[tabel_inventory['Rekomendasi Waktu'].str.contains('AMAN', na=False)])
+
+    health_score = int((cnt_aman / cnt_total) * 100) if cnt_total > 0 else 0
+    risk_score = min(int(((cnt_kritis * 1.5 + cnt_warning) / cnt_total) * 100) if cnt_total > 0 else 0, 100)
+    forecast_score = st.session_state.dq_score if fitur_forecast_aktif else 0
+
+    # --- 9. MODERNISASI STRUKTUR MENU ---
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+        "📊 Dashboard", 
+        "🚚 Reorder Advisor", 
+        "🔍 Item Explorer", 
+        "🔬 Risk Simulator", 
+        "📈 Forecast Center", 
+        "🗄️ Data Explorer"
+    ])
+
+    with tab1:
+        st.markdown("### 🤖 AI Executive Summary")
+        ringkasan = f"Gudang Anda saat ini mengelola **{cnt_total} item**."
+        if cnt_kritis > 0:
+            item_kritis_nama = tabel_inventory[tabel_inventory['Rekomendasi Waktu'].str.contains('KRITIS', na=False)]['Nama Barang'].iloc[0]
+            ringkasan += f" ⚠️ **Peringatan Penting:** Terdapat **{cnt_kritis} item dalam kondisi kritis** (salah satunya: *{item_kritis_nama}*). Potensi kekosongan stok (*stockout*) sudah di depan mata."
+        else:
+            ringkasan += " ✅ Kondisi operasional saat ini **sangat sehat**, tidak ada item yang terancam habis dalam waktu dekat."
+        st.info(ringkasan)
+        st.markdown("---")
+
+        c_score1, c_score2, c_score3 = st.columns(3)
+        c_score1.metric("🏥 Inventory Health Score", f"{health_score}/100", "Indikator Keamanan")
+        c_score2.metric("⚠️ Supply Chain Risk Score", f"{risk_score}/100", "-Indikator Risiko", delta_color="inverse")
+        c_score3.metric("🔮 Forecast Reliability", f"{forecast_score}/100", "Berdasarkan Data Quality")
+        st.markdown("---")
+
+        st.subheader("🔔 Papan Peringatan Cepat (Alert Cards)")
+        col_alert1, col_alert2 = st.columns(2)
+        with col_alert1:
+            if cnt_kritis > 0:
+                for idx, row in tabel_inventory[tabel_inventory['Rekomendasi Waktu'].str.contains('KRITIS')].head(5).iterrows():
+                    sisa_teks = f"Sisa {row['Sisa Hari']} Hari" if fitur_forecast_aktif else "Di Bawah Batas Minimum"
+                    st.markdown(f"<div class='alert-card-kritis'>🔴 Kritis: {row['Nama Barang']} – {sisa_teks}</div>", unsafe_allow_html=True)
+            else: st.success("🟢 Tidak ada item kritis.")
+        with col_alert2:
+            if cnt_warning > 0:
+                for idx, row in tabel_inventory[tabel_inventory['Rekomendasi Waktu'].str.contains('WARNING')].head(5).iterrows():
+                    sisa_teks = f"Sisa {row['Sisa Hari']} Hari" if fitur_forecast_aktif else "Perlu Pemantauan"
+                    st.markdown(f"<div class='alert-card-warning'>🟡 Warning: {row['Nama Barang']} – {sisa_teks}</div>", unsafe_allow_html=True)
+            else: st.info("🟢 Tidak ada item dalam status warning.")
+        if (cnt_kritis + cnt_warning) > 10: st.caption("*Hanya menampilkan 5 peringatan teratas. Lihat tab Data Explorer untuk selengkapnya.*")
+
+        st.markdown("---")
+        st.subheader("Peta Status Persediaan (Kuantitas Fisik)")
+        warna_grafik = 'Rekomendasi Waktu'
+        warna_status = {'🚨 KRITIS (Pesan Sekarang)': '#ef553b', '🚨 KRITIS (Di Bawah ROP)': '#ef553b', '⚠️ WARNING (Siapkan PO)': '#feca28', '✅ AMAN': '#00cc96'}
+        if kustom := st.session_state.kolom_kustom: warna_grafik = kustom[0]; warna_status = None
+        st.plotly_chart(px.bar(tabel_inventory, x='Nama Barang', y='Stok Saat Ini', color=warna_grafik, color_discrete_map=warna_status, text='Stok Saat Ini').update_traces(textposition='outside'), use_container_width=True)
+
+        if fitur_finansial_aktif:
+            st.markdown("---")
+            st.subheader("🎯 Klasifikasi Manajemen ABC & Kurva Pareto")
+            tabel_inventory['Kumulatif_Pct_100'] = tabel_inventory['Kumulatif_Pct'] * 100
+            bar_colors = tabel_inventory['Analisis ABC'].map({'Kategori A': '#1f77b4', 'Kategori B': '#ff7f0e', 'Kategori C': '#2ca02c'}).tolist()
+            
+            fig_pareto = make_subplots(specs=[[{"secondary_y": True}]])
+            fig_pareto.add_trace(go.Bar(x=tabel_inventory['Nama Barang'], y=tabel_inventory['Total Nilai Aset'], name="Nilai Aset Item", marker_color=bar_colors), secondary_y=False)
+            fig_pareto.add_trace(go.Scatter(x=tabel_inventory['Nama Barang'], y=tabel_inventory['Kumulatif_Pct_100'], name="Kurva Kumulatif (%)", mode="lines+markers", line=dict(color="#ef553b", width=3)), secondary_y=True)
+            fig_pareto.update_layout(margin=dict(t=40, b=40))
+            st.plotly_chart(fig_pareto, use_container_width=True)
+            
+            item_a = len(tabel_inventory[tabel_inventory['Analisis ABC'] == 'Kategori A'])
+            if total_nilai_gudang > 0:
+                pct_a = tabel_inventory[tabel_inventory['Analisis ABC'] == 'Kategori A']['Total Nilai Aset'].sum() / total_nilai_gudang * 100
+                st.markdown(f"<div class='insight-box'><b>💡 Insight Pareto Analisis:</b> Sebanyak <b>{item_a} item Kategori A</b> menyumbang <b>{pct_a:.1f}%</b> dari total nilai aset. Fokuskan pengawasan ketat pada item berlabel biru ini.</div>", unsafe_allow_html=True)
+
+    with tab2:
+        st.subheader("📋 Rekomendasi Pembelian Barang Otomatis (AI Advisor)")
+        if fitur_forecast_aktif:
+            kolom_tampil = ['Nama Barang', 'Stok Saat Ini', 'Penggunaan Harian', 'Sisa Hari', 'Hari Terbaik Memesan', 'Rekomendasi Pembelian', 'Rekomendasi Jumlah Beli (Unit)']
+            st.dataframe(tabel_inventory[kolom_tampil].style.map(lambda v: 'background-color: #ffcccc; color: #cc0000; font-weight: bold;' if v == "🚨 Harus Dipesan Hari Ini!" else ('background-color: #fff2cc; color: #cc9900;' if "⏳ Jadwalkan" in str(v) else ''), subset=['Rekomendasi Pembelian']), use_container_width=True)
+            
+            item_reorder = len(tabel_inventory[tabel_inventory['Rekomendasi Pembelian'] == "🚨 Harus Dipesan Hari Ini!"])
+            if item_reorder > 0:
+                st.markdown(f"<div class='insight-box'><b>💡 Insight Operasional:</b> Diperlukan penerbitan Purchase Order (PO) <b>HARI INI JUGA</b> untuk <b>{item_reorder} item</b> agar terhindar dari potensi *stockout* akibat terpotong waktu tunggu (*Lead Time*) pengiriman {st.session_state.lead_time} hari.</div>", unsafe_allow_html=True)
+
+    with tab3:
+        st.subheader("🔍 Smart Item Explorer")
+        st.write("💡 *Tips: Klik kotak di bawah dan **ketik sebagian nama barang** untuk mencari dengan cepat.*")
+        pilihan_barang = st.selectbox("Cari dan Pilih SKU Barang:", tabel_inventory['Nama Barang'].tolist(), index=None, placeholder="Ketik nama item di sini...")
+        if pilihan_barang:
+            d_item = tabel_inventory[tabel_inventory['Nama Barang'] == pilihan_barang].iloc[0]
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Stok Saat Ini", f"{d_item['Stok Saat Ini']} Unit", d_item['Rekomendasi Waktu'])
+            if fitur_finansial_aktif: c2.metric("Nilai Aset", f"Rp {d_item['Total Nilai Aset']:,.0f}", d_item['Analisis ABC'])
+            if fitur_forecast_aktif: c3.metric("Ketahanan", f"{d_item['Sisa Hari']} Hari", d_item['Rekomendasi Pembelian'])
+        else: st.info("Silakan cari dan pilih barang untuk melihat metrik mendalamnya.")
+
+    with tab4:
+        st.subheader("🔬 Simulasi Skenario Risiko (What-If Analysis)")
+        if fitur_forecast_aktif:
+            c_w1, c_w2 = st.columns(2)
+            sim_dm = c_w1.slider("Lonjakan Permintaan (%)", 0, 100, 0, 5)
+            sim_lt = c_w2.slider("Keterlambatan Pengiriman Supplier (Hari)", 0, 14, 0, 1)
+            
+            df_sim = tabel_inventory.copy()
+            df_sim['Sim_Sisa'] = (df_sim['Stok Saat Ini'] / (df_sim['Penggunaan Harian'] * (1 + (sim_dm/100)))).round(1)
+            df_sim['Sim_Status'] = np.where(df_sim['Sim_Sisa'] <= (st.session_state.lead_time + sim_lt), "🚨 KRITIS (Gagal Penuhi Permintaan)!", "✅ Aman")
+            st.dataframe(df_sim[['Nama Barang', 'Sisa Hari', 'Sim_Sisa', 'Rekomendasi Pembelian', 'Sim_Status']].style.map(lambda v: 'background-color: #ffcccc; color: #cc0000; font-weight: bold;' if "KRITIS" in str(v) else '', subset=['Sim_Status']), use_container_width=True)
+
+    with tab5:
+        st.subheader("Simulasi Penurunan Stok Keseluruhan")
+        if fitur_forecast_aktif:
+            hari = np.arange(0, 31); df_fc = pd.DataFrame({'Hari Ke-': hari})
+            for idx, r in tabel_inventory.iterrows(): df_fc[r['Nama Barang']] = np.maximum(r['Stok Saat Ini'] - (r['Penggunaan Harian'] * hari), 0)
+            st.plotly_chart(px.line(df_fc.melt(id_vars=['Hari Ke-'], var_name='Nama Barang', value_name='Stok'), x='Hari Ke-', y='Stok', color='Nama Barang', markers=True), use_container_width=True)
+
+    with tab6:
+        st.subheader("🗄️ Tabel Data Explorer Terpadu")
+        if kustom := st.session_state.kolom_kustom:
+            kolom_filter = st.columns(len(kustom))
+            for i, col_name in enumerate(kustom):
+                with kolom_filter[i]:
+                    pilih_unik = ["Semua"] + tabel_mentah[col_name].dropna().astype(str).unique().tolist()
+                    filter_val = st.selectbox(f"Saring {col_name.replace('_', ' ')}:", pilih_unik)
+                    if filter_val != "Semua": tabel_inventory = tabel_inventory[tabel_mentah[col_name].astype(str) == filter_val]
+
+        def style_status(val):
+            if 'KRITIS' in str(val): return 'background-color: #ffcccc; color: #cc0000; font-weight: bold;'
+            elif 'WARNING' in str(val): return 'background-color: #fff2cc; color: #cc9900; font-weight: bold;'
+            elif 'AMAN' in str(val): return 'background-color: #d1e7dd; color: #0f5132;'
+            return ''
+        subset_styling = [c for c in ['Rekomendasi Waktu', 'Rekomendasi Pembelian'] if c in tabel_inventory.columns]
+        st.dataframe(tabel_inventory.style.map(style_status, subset=subset_styling), use_container_width=True)
